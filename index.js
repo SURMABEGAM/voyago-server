@@ -7,8 +7,18 @@ console.log("Stripe Key:", process.env.STRIPE_SECRET_KEY);
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const e = require("express");
-
 const app = express();
+
+const admin = require("firebase-admin");
+const serviceAccount = require("./voyago-server-firebase-adminsdk-fbsvc-29ddd31702.json");
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf-8",
+);
+const serviceAccountDecoded = JSON.parse(decoded);
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
 app.use(cors());
 app.use(express.json());
 

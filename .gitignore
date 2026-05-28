@@ -1,2 +1,7 @@
 node_modules
 .env
+.vercel
+
+.key-convert.js
+
+voyago-server-firebase-adminsdk-fbsvc-29ddd31702.json
