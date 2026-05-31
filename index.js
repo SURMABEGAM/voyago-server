@@ -36,7 +36,6 @@ app.use(
   }),
 );
 app.use(express.json());
-
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@programming.bmabwzr.mongodb.net/?appName=Programming`;
 const client = new MongoClient(uri, {
   serverApi: {
@@ -721,6 +720,11 @@ async function run() {
           if (exists)
             return res.send({ success: true, message: "Already saved" });
           const quantity = parseInt(session.metadata.quantity) || 1;
+
+          const ticketData = await ticketsCollection.findOne({
+            _id: new ObjectId(session.metadata.ticketId),
+          });
+
           const result = await bookingCollection.insertOne({
             sessionId,
             ticketId: session.metadata.ticketId,
@@ -729,6 +733,9 @@ async function run() {
             from: session.metadata.from,
             to: session.metadata.to,
             busType: session.metadata.busType,
+            title: session.metadata.title, // ← title
+            departureDate: ticketData?.departureDate || null, // ← date
+            departureTime: ticketData?.departureTime || null, // ← time
             quantity,
             price: session.amount_total / 100,
             status: "paid",
