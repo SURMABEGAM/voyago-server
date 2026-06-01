@@ -19,23 +19,12 @@ admin.initializeApp({
 
 app.use(
   cors({
-    origin: (origin, callback) => {
-      const allowed = ["https://voyago-client-eight.vercel.app"];
-
-      if (
-        !origin ||
-        allowed.includes(origin) ||
-        origin.endsWith(".vercel.app")
-      ) {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
-      }
-    },
+    origin: "*",
     credentials: true,
   }),
 );
 app.use(express.json());
+
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@programming.bmabwzr.mongodb.net/?appName=Programming`;
 const client = new MongoClient(uri, {
   serverApi: {
@@ -72,7 +61,6 @@ const verifyVendor = (req, res, next) => {
 
 async function run() {
   try {
-    await client.connect();
     const db = client.db("voyago_db");
     const usersCollection = db.collection("users");
     const ticketsCollection = db.collection("tickets");
@@ -871,8 +859,10 @@ async function run() {
     console.error("Failed to connect to MongoDB:", err);
   }
 }
-
 run().catch(console.dir);
-app.listen(5000, () => {
-  console.log("Server running on port 5000");
-});
+
+if (process.env.NODE_ENV !== "production") {
+  app.listen(5000, () => {
+    console.log("Server running on port 5000");
+  });
+}
