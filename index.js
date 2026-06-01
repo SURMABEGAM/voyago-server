@@ -20,7 +20,7 @@ admin.initializeApp({
 app.use(
   cors({
     origin: (origin, callback) => {
-      const allowed = ["http://localhost:5173"];
+      const allowed = ["https://voyago-client-eight.vercel.app"];
 
       if (
         !origin ||
