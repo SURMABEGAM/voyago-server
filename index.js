@@ -848,7 +848,7 @@ async function run() {
 
             res.send({ success: true, result });
           } catch (insertErr) {
-            // Duplicate booking — race condition থেকে বাঁচায়
+            //  Duplicate booking — race condition
             if (insertErr.code === 11000) {
               return res.send({ success: true, message: "Already saved" });
             }
