@@ -1,6 +1,6 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-require("dotenv").config();
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const bcrypt = require("bcryptjs");
@@ -68,22 +68,36 @@ async function run() {
     const transactionsCollection = db.collection("transactions");
     console.log("MongoDB connected successfully!");
 
+    await bookingCollection.createIndex(
+      { sessionId: 1 },
+      { unique: true, sparse: true },
+    );
+    await transactionsCollection.createIndex(
+      { transactionId: 1 },
+      { unique: true },
+    );
+
     // AUTH
     app.post("/api/register", async (req, res) => {
       try {
-        const { name, email, password } = req.body;
+        const { name, email, password, photoURL, role } = req.body;
         const existingUser = await usersCollection.findOne({ email });
         if (existingUser)
           return res.status(409).json({ message: "Email already exists" });
-        const hashedPassword = await bcrypt.hash(password, 10);
-        await usersCollection.insertOne({
-          name,
+
+        const userData = {
+          name: name || "",
           email,
-          password: hashedPassword,
-          photoURL: req.body.photoURL || "",
+          photoURL: photoURL || "",
           role: "user",
           createdAt: new Date(),
-        });
+        };
+
+        if (password) {
+          userData.password = await bcrypt.hash(password, 10);
+        }
+
+        await usersCollection.insertOne(userData);
         res.status(201).json({ message: "User registered successfully" });
       } catch (error) {
         res.status(500).json({ message: error.message });
@@ -358,6 +372,22 @@ async function run() {
         }
       },
     );
+    app.get(
+      "/api/admin/all-tickets",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const tickets = await ticketsCollection
+            .find({})
+            .sort({ createdAt: -1 })
+            .toArray();
+          res.json(tickets);
+        } catch (error) {
+          res.status(500).json({ message: error.message });
+        }
+      },
+    );
 
     // VENDOR
     app.post(
@@ -546,19 +576,42 @@ async function run() {
       verifyVendor,
       async (req, res) => {
         try {
+          // ১. এই vendor-এর সব ticket আনো
           const vendorTickets = await ticketsCollection
             .find({ vendorEmail: req.user.email }, { projection: { _id: 1 } })
             .toArray();
+
           const ticketIds = vendorTickets.map((t) => t._id.toString());
+
+          if (ticketIds.length === 0) {
+            return res.json({
+              totalRevenue: 0,
+              totalTicketsSold: 0,
+              totalTicketsAdded: 0,
+            });
+          }
+
+          // ২. paid booking খোঁজো — status 'paid' বা 'Paid' দুইটাই
           const paidBookings = await bookingCollection
-            .find({ ticketId: { $in: ticketIds }, status: "paid" })
+            .find({
+              ticketId: { $in: ticketIds },
+              status: { $in: ["paid", "Paid"] },
+            })
             .toArray();
+
+          // ৩. calculate
+          const totalRevenue = paidBookings.reduce(
+            (sum, b) => sum + (b.price || 0),
+            0,
+          );
+          const totalTicketsSold = paidBookings.reduce(
+            (sum, b) => sum + (b.quantity || 1),
+            0,
+          );
+
           res.json({
-            totalRevenue: paidBookings.reduce((s, b) => s + (b.price || 0), 0),
-            totalTicketsSold: paidBookings.reduce(
-              (s, b) => s + (b.quantity || 1),
-              0,
-            ),
+            totalRevenue,
+            totalTicketsSold,
             totalTicketsAdded: vendorTickets.length,
           });
         } catch (error) {
@@ -661,7 +714,29 @@ async function run() {
         const email = req.params.email;
         if (req.user.email !== email && req.user.role !== "admin")
           return res.status(403).json({ message: "Forbidden" });
-        const result = await bookingCollection.find({ email }).toArray();
+
+        const allBookings = await bookingCollection.find({ email }).toArray();
+
+        const groupMap = new Map();
+
+        for (const booking of allBookings) {
+          const key = `${booking.ticketId}_${booking.departureDate}_${booking.departureTime}_${booking.quantity}`;
+          const status = booking.status?.toLowerCase();
+
+          if (!groupMap.has(key)) {
+            groupMap.set(key, booking);
+          } else {
+            const existing = groupMap.get(key);
+            const existingStatus = existing.status?.toLowerCase();
+
+            if (status === "paid") {
+              groupMap.set(key, booking);
+            } else if (existingStatus !== "paid" && status === "approved") {
+            }
+          }
+        }
+
+        const result = Array.from(groupMap.values());
         res.send(result);
       } catch (error) {
         res.status(500).send({ message: "Failed to fetch bookings" });
@@ -704,54 +779,63 @@ async function run() {
       try {
         const session = await stripe.checkout.sessions.retrieve(sessionId);
         if (session.payment_status === "paid") {
+          // Already saved check
           const exists = await bookingCollection.findOne({ sessionId });
           if (exists)
             return res.send({ success: true, message: "Already saved" });
-          const quantity = parseInt(session.metadata.quantity) || 1;
 
+          const quantity = parseInt(session.metadata.quantity) || 1;
           const ticketData = await ticketsCollection.findOne({
             _id: new ObjectId(session.metadata.ticketId),
           });
 
-          const result = await bookingCollection.insertOne({
-            sessionId,
-            ticketId: session.metadata.ticketId,
-            customerName: session.customer_email,
-            email: session.customer_email,
-            from: session.metadata.from,
-            to: session.metadata.to,
-            busType: session.metadata.busType,
-            title: session.metadata.title, // ← title
-            departureDate: ticketData?.departureDate || null, // ← date
-            departureTime: ticketData?.departureTime || null, // ← time
-            quantity,
-            price: session.amount_total / 100,
-            status: "paid",
-            adminStatus: "pending",
-            createdAt: new Date(),
-          });
-
-          await ticketsCollection.updateOne(
-            { _id: new ObjectId(session.metadata.ticketId) },
-            { $inc: { quantity: -quantity } },
-          );
-
-          // ← এটা add করো — transaction automatically save হবে
-          const alreadyTransaction = await transactionsCollection.findOne({
-            transactionId: session.id,
-          });
-          if (!alreadyTransaction) {
-            await transactionsCollection.insertOne({
+          try {
+            const result = await bookingCollection.insertOne({
+              sessionId,
+              ticketId: session.metadata.ticketId,
+              customerName: session.customer_email,
               email: session.customer_email,
-              title: session.metadata?.title,
-              ticketId: session.metadata?.ticketId,
-              amount: session.amount_total / 100,
-              transactionId: session.id,
-              date: new Date(),
+              from: session.metadata.from,
+              to: session.metadata.to,
+              busType: session.metadata.busType,
+              title: session.metadata.title,
+              departureDate: ticketData?.departureDate || null,
+              departureTime: ticketData?.departureTime || null,
+              quantity,
+              price: session.amount_total / 100,
+              status: "paid",
+              adminStatus: "pending",
+              createdAt: new Date(),
             });
-          }
 
-          res.send({ success: true, result });
+            await ticketsCollection.updateOne(
+              { _id: new ObjectId(session.metadata.ticketId) },
+              { $inc: { quantity: -quantity } },
+            );
+
+            // Transaction save
+            try {
+              await transactionsCollection.insertOne({
+                email: session.customer_email,
+                title: session.metadata?.title,
+                ticketId: session.metadata?.ticketId,
+                amount: session.amount_total / 100,
+                transactionId: session.id,
+                date: new Date(),
+              });
+            } catch (txErr) {
+              // Duplicate transaction — ignore
+              if (txErr.code !== 11000) throw txErr;
+            }
+
+            res.send({ success: true, result });
+          } catch (insertErr) {
+            // Duplicate booking — race condition থেকে বাঁচায়
+            if (insertErr.code === 11000) {
+              return res.send({ success: true, message: "Already saved" });
+            }
+            throw insertErr;
+          }
         } else {
           res.status(400).send({ error: "Payment not completed" });
         }
@@ -763,7 +847,7 @@ async function run() {
     // STRIPE
     app.post("/create-checkout-session", verifyToken, async (req, res) => {
       try {
-        const { ticketId, quantity = 1 } = req.body;
+        const { ticketId, quantity = 1, bookingId } = req.body;
         const ticket = await ticketsCollection.findOne({
           _id: new ObjectId(ticketId),
         });
@@ -810,6 +894,16 @@ async function run() {
           success_url: `${process.env.DOMAIN_STRIPE}/stripe/success?session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${process.env.DOMAIN_STRIPE}/stripe/cancel`,
         });
+
+        if (bookingId) {
+          try {
+            await bookingCollection.deleteOne({
+              _id: new ObjectId(bookingId),
+              email: req.user.email,
+            });
+          } catch (_) {}
+        }
+
         res.json({ url: session.url });
       } catch (error) {
         res.status(500).json({ error: "Payment session creation failed" });
@@ -861,8 +955,6 @@ async function run() {
 }
 run().catch(console.dir);
 
-if (process.env.NODE_ENV !== "production") {
-  app.listen(5000, () => {
-    console.log("Server running on port 5000");
-  });
-}
+app.listen(process.env.PORT, () => {
+  console.log(`Server running on port, ${process.env.PORT}`);
+});
